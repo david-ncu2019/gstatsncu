@@ -23,17 +23,33 @@ def analyze_trend(X, Y, Z, order: int = 1):
     f_pvalue = float(ols_results.f_pvalue)
     r2_fit = float(ols_results.rsquared)
     
-    # Adaptive Cross-Validation
+    # Adaptive Cross-Validation (Spatial Split Validation)
     if N < 1000:
-        cv_pipeline = make_pipeline(PolynomialFeatures(degree=order, include_bias=False), LinearRegression())
-        # Use K-fold CV with K up to 50 (effectively LOOCV for N <= 50)
-        # Ensure cv_folds is at least 2
-        cv_folds = max(2, min(N, 50))
-        # Use cross_val_predict to get out-of-sample predictions
-        Z_pred_cv = cross_val_predict(cv_pipeline, coords, Z, cv=cv_folds)
-        r2_cv = float(r2_score(Z, Z_pred_cv))
-        metric_used = 'cv'
-        effective_r2 = r2_cv
+        x_median = np.median(X)
+        mask_left = X < x_median
+        mask_right = ~mask_left
+        
+        # Safety Guard: If either split is empty, fallback to OLS r2_fit
+        if not np.any(mask_left) or not np.any(mask_right):
+            r2_cv = r2_fit
+            metric_used = 'fit'
+            effective_r2 = r2_fit
+        else:
+            model = make_pipeline(PolynomialFeatures(degree=order, include_bias=False), LinearRegression())
+            
+            # Left to Right
+            model.fit(coords[mask_left], Z[mask_left])
+            Z_pred_right = model.predict(coords[mask_right])
+            r2_l2r = float(r2_score(Z[mask_right], Z_pred_right))
+            
+            # Right to Left
+            model.fit(coords[mask_right], Z[mask_right])
+            Z_pred_left = model.predict(coords[mask_left])
+            r2_r2l = float(r2_score(Z[mask_left], Z_pred_left))
+            
+            r2_cv = (r2_l2r + r2_r2l) / 2.0
+            metric_used = 'cv_spatial_split'
+            effective_r2 = r2_cv
     else:
         r2_cv = None
         metric_used = 'fit'
