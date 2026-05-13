@@ -210,9 +210,9 @@ def run_slice(sampled_df, true_domain, grid_df, config, scenario_name, out_dir, 
     
     print(f"[{scenario_name}] Generating variogram visualizations...")
     time_suffix = f"_t{time_val}" if time_val is not None else ""
-    viz.plot_variogram_analysis(emp_var, fit_params, true_line, fitted_line, dir_var, out_file=str(out_dir / f"variogram_results{time_suffix}.png"))
+    viz.plot_variogram_analysis(emp_var, fit_params, true_line, fitted_line, dir_var, out_file=str(out_dir / f"variogram_results{time_suffix}.png"), time_val=time_val)
     if fitted_vgm_params:
-        viz.plot_anisotropy_ellipse(fitted_vgm_params, primary_vgm, scenario_name=scenario_name, out_file=str(out_dir / f"anisotropy_ellipse{time_suffix}.png"))
+        viz.plot_anisotropy_ellipse(fitted_vgm_params, primary_vgm, scenario_name=scenario_name, out_file=str(out_dir / f"anisotropy_ellipse{time_suffix}.png"), time_val=time_val)
     
     # 5. Run Kriging
     print(f"[{scenario_name}] Running Kriging...")
@@ -279,9 +279,13 @@ def run_slice(sampled_df, true_domain, grid_df, config, scenario_name, out_dir, 
     }
     
     # 9. Generate Visualizations
-    from viz import plot_2d_results
+    from viz import plot_2d_results, plot_3d_comparison_dashboard
     print(f"[{scenario_name}] Generating spatial visualizations...")
-    viz.plot_2d_results(merged_df, sampled_df, config['domain'], out_file=str(out_dir / f"spatial_results{time_suffix}.png"))
+    viz.plot_2d_results(merged_df, sampled_df, config['domain'], out_file=str(out_dir / f"spatial_results{time_suffix}.png"), time_val=time_val)
+    
+    if config['domain'].get('nz', 1) > 1:
+        print(f"[{scenario_name}] Generating 3D volumetric comparison dashboard...")
+        viz.plot_3d_comparison_dashboard(merged_df, sampled_df, out_file=str(out_dir / f"comparison_3d_results{time_suffix}.png"), time_val=time_val)
         
     print(f"[{scenario_name}] Done with slice {time_val}!")
     

@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import os
 
-def plot_anisotropy_ellipse(fitted_params, true_params=None, scenario_name="", out_file='anisotropy_ellipse.png'):
+def plot_anisotropy_ellipse(fitted_params, true_params=None, scenario_name="", out_file='anisotropy_ellipse.png', time_val=None):
     """Draw correlation ellipse comparing recovered vs true anisotropy."""
     angle = fitted_params.get("angle", 0.0)
     ls_major = float(fitted_params.get("range", 1.0))
@@ -44,7 +44,7 @@ def plot_anisotropy_ellipse(fitted_params, true_params=None, scenario_name="", o
     plt.close(fig)
     print(f"Anisotropy ellipse saved to {out_file}")
 
-def plot_2d_results(merged_df: pd.DataFrame, sampled_df: pd.DataFrame, domain_cfg: dict, out_file: str = 'spatial_results.png'):
+def plot_2d_results(merged_df: pd.DataFrame, sampled_df: pd.DataFrame, domain_cfg: dict, out_file: str = 'spatial_results.png', time_val=None):
     nx = domain_cfg.get('nx', 50)
     ny = domain_cfg.get('ny', 50)
     nz = domain_cfg.get('nz', 1)
@@ -150,3 +150,103 @@ def plot_variogram_analysis(emp_var_df, fit_params, true_line, fitted_line, dir_
     plt.close(fig)
     print(f"Variogram visualizations saved to {out_file}")
 
+
+
+def plot_3d_comparison_dashboard(merged_df: pd.DataFrame, sampled_df: pd.DataFrame, out_file: str = 'comparison_3d.png', time_val=None):
+    """
+    Plots a 3-panel 3D comparison: Ground Truth, Prediction, and Absolute Error.
+    """
+    fig = plt.figure(figsize=(24, 8))
+    
+    # Get unique coordinates
+    x_vals = np.sort(merged_df['x'].unique())
+    y_vals = np.sort(merged_df['y'].unique())
+    z_vals = np.sort(merged_df['z'].unique())
+    nx, ny, nz = len(x_vals), len(y_vals), len(z_vals)
+    i_mid, j_mid, k_mid = nx // 2, ny // 2, nz // 2
+    
+    # Pre-calculate matrices
+    V_true = np.zeros((ny, nx, nz))
+    V_pred = np.zeros((ny, nx, nz))
+    for i, z in enumerate(z_vals):
+        slice_df = merged_df[merged_df['z'] == z]
+        V_true[:, :, i] = slice_df.pivot(index='y', columns='x', values='value').reindex(index=y_vals, columns=x_vals).values
+        V_pred[:, :, i] = slice_df.pivot(index='y', columns='x', values='pred').reindex(index=y_vals, columns=x_vals).values
+    
+    V_diff = np.abs(V_true - V_pred)
+    
+    # Unified color range for True and Pred
+    vmin = min(merged_df['value'].min(), merged_df['pred'].min())
+    vmax = max(merged_df['value'].max(), merged_df['pred'].max())
+    
+    def plot_block(ax, V_data, cmap, v_min, v_max, title):
+        def plot_face(X_grid, Y_grid, Z_grid, C):
+            norm = plt.Normalize(vmin=v_min, vmax=v_max)
+            colors = plt.cm.get_cmap(cmap)(norm(C))
+            ax.plot_surface(X_grid, Y_grid, Z_grid, facecolors=colors, shade=False, edgecolor='black', linewidth=0.05)
+
+        # 1. Top
+        X, Y = np.meshgrid(x_vals, y_vals); Z = np.full_like(X, z_vals[-1]); C = V_data[:, :, -1].copy()
+        mask = np.zeros((ny, nx), dtype=bool); mask[:j_mid, i_mid:] = True; Z[mask] = np.nan
+        plot_face(X, Y, Z, C)
+        # 2. Bottom
+        X, Y = np.meshgrid(x_vals, y_vals); Z = np.full_like(X, z_vals[0]); C = V_data[:, :, 0]
+        plot_face(X, Y, Z, C)
+        # 3. Back (Y=max)
+        X, Z_g = np.meshgrid(x_vals, z_vals); Y_p = np.full_like(X, y_vals[-1]); C = V_data[-1, :, :].T
+        plot_face(X, Y_p, Z_g, C)
+        # 4. Front (Y=min)
+        X, Z_g = np.meshgrid(x_vals, z_vals); Y_p = np.full_like(X, y_vals[0]); C = V_data[0, :, :].T
+        mask = np.zeros((nz, nx), dtype=bool); mask[k_mid:, i_mid:] = True; Y_p[mask] = np.nan
+        plot_face(X, Y_p, Z_g, C)
+        # 5. Right (X=max)
+        Y_p, Z_g = np.meshgrid(y_vals, z_vals); X_p = np.full_like(Y_p, x_vals[-1]); C = V_data[:, -1, :].T
+        mask = np.zeros((nz, ny), dtype=bool); mask[k_mid:, :j_mid] = True; X_p[mask] = np.nan
+        plot_face(X_p, Y_p, Z_g, C)
+        # 6. Left (X=min)
+        Y_p, Z_g = np.meshgrid(y_vals, z_vals); X_p = np.full_like(Y_p, x_vals[0]); C = V_data[:, 0, :].T
+        plot_face(X_p, Y_p, Z_g, C)
+        # Inner faces
+        Y_p, Z_g = np.meshgrid(y_vals[:j_mid], z_vals[k_mid:]); X_p = np.full_like(Y_p, x_vals[i_mid]); C = V_data[:j_mid, i_mid, k_mid:].T
+        plot_face(X_p, Y_p, Z_g, C)
+        X_p, Z_g = np.meshgrid(x_vals[i_mid:], z_vals[k_mid:]); Y_p = np.full_like(X_p, y_vals[j_mid]); C = V_data[j_mid, i_mid:, k_mid:].T
+        plot_face(X_p, Y_p, Z_g, C)
+        X_p, Y_p = np.meshgrid(x_vals[i_mid:], y_vals[:j_mid]); Z_g = np.full_like(X_p, z_vals[k_mid]); C = V_data[:j_mid, i_mid:, k_mid]
+        plot_face(X_p, Y_p, Z_g, C)
+
+        ax.set_title(title, fontsize=15, fontweight='bold')
+        ax.xaxis.pane.fill = ax.yaxis.pane.fill = ax.zaxis.pane.fill = False
+        ax.grid(False)
+        ax.view_init(elev=30, azim=-45)
+
+    # Panel 1: True
+    ax1 = fig.add_subplot(131, projection='3d')
+    plot_block(ax1, V_true, 'viridis', vmin, vmax, "Ground Truth Volume")
+    
+    # Panel 2: Predicted
+    ax2 = fig.add_subplot(132, projection='3d')
+    plot_block(ax2, V_pred, 'viridis', vmin, vmax, "Kriging Prediction")
+    
+    # Shared Colorbar for 1 & 2
+    m1 = plt.cm.ScalarMappable(cmap='viridis')
+    m1.set_array(merged_df['value'])
+    m1.set_clim(vmin, vmax)
+    cb1 = fig.colorbar(m1, ax=[ax1, ax2], shrink=0.5, pad=0.05, location='bottom')
+    cb1.set_label('Value Units')
+
+    # Panel 3: Difference
+    ax3 = fig.add_subplot(133, projection='3d')
+    diff_max = float(V_diff.max())
+    plot_block(ax3, V_diff, 'Reds', 0, diff_max, "Absolute Error (|True-Pred|)")
+    
+    m3 = plt.cm.ScalarMappable(cmap='Reds')
+    m3.set_array(V_diff)
+    m3.set_clim(0, diff_max)
+    cb3 = fig.colorbar(m3, ax=ax3, shrink=0.5, pad=0.05, location='bottom')
+    cb3.set_label('Residual Error')
+
+    t_str = f" [Time: {time_val}]" if time_val is not None else ""
+    plt.suptitle(f"3D Volumetric Kriging Comparison{t_str}", fontsize=20, fontweight='bold', y=0.95)
+    plt.savefig(out_file, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    print(f"3D Comparison Dashboard saved to {out_file}")
