@@ -121,30 +121,13 @@ def get_primary_structure(vgm_params):
         'nugget': float(vgm_params.get('nugget', 0.0))
     }
 
-def run_pipeline(config_path):
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
-        
-    scenario_name = Path(config_path).stem
-    out_dir = Path("output") / scenario_name
-    out_dir.mkdir(parents=True, exist_ok=True)
-    
-    seed = config.get('random_seed', 42)
-    
-    # 1. Create Grid
-    grid_df = create_grid(config['domain'])
-    
-    # 2. Run SGS
-    print(f"[{scenario_name}] Running SGS...")
-    true_domain = generate_sgs(grid_df, config['sgs_variogram'], nsim=1, seed=seed)
-    
-    # 3. Add trend & noise
-    true_domain = apply_trend(true_domain, config.get('trend', {}))
-    true_domain = apply_noise(true_domain, config.get('noise', {}).get('std_dev', 0.0), seed=seed)
-    
-    # 4. Sample
-    print(f"[{scenario_name}] Sampling domain...")
-    sampled_df = sample_domain(true_domain, config.get('sampling', {}), seed=seed)
+
+def run_slice(sampled_df, true_domain, grid_df, config, scenario_name, out_dir, time_val=None):
+    import r_engine
+    import viz
+    import json
+    from pathlib import Path
+    import numpy as np
     
     # 4.2 Detrending Analysis
     pre_cfg = config.get("preprocessing", {}).get("detrend", {})
@@ -157,7 +140,7 @@ def run_pipeline(config_path):
         from preprocessor import analyze_trend, TrendProcessor
         print(f"[{scenario_name}] Trend Analysis...")
         trend_stats = analyze_trend(sampled_df['x'].values, sampled_df['y'].values, sampled_df['value'].values, order=trend_order)
-        print(f"[{scenario_name}]   F-test p-value: {trend_stats['f_pvalue']:.4e} | R²: {trend_stats['r2']:.4f}")
+        print(f"[{scenario_name}]   F-test p-value: {trend_stats['f_pvalue']:.4e} | R² ({trend_stats['metric_used']}): {trend_stats['effective_r2']:.4f}")
         
         if auto_detect:
             do_detrend = trend_stats['recommend_detrend']
@@ -166,9 +149,7 @@ def run_pipeline(config_path):
             print(f"[{scenario_name}]   -> Significant trend detected. Detrending ENABLED (Order {trend_order}).")
             processor = TrendProcessor(order=trend_order)
             processor.fit(sampled_df['x'].values, sampled_df['y'].values, sampled_df['value'].values)
-            # Detrend the sample data for variogram and kriging
             sampled_df['value'] = processor.detrend(sampled_df['x'].values, sampled_df['y'].values, sampled_df['value'].values)
-            # Update formula to Simple/Ordinary Kriging since trend is handled
             config['kriging']['formula'] = "value ~ 1"
         else:
             print(f"[{scenario_name}]   -> No significant trend. Detrending DISABLED.")
@@ -186,20 +167,15 @@ def run_pipeline(config_path):
     
     # 4.5 Variogram Analysis
     print(f"[{scenario_name}] Performing Variogram Analysis...")
-    import r_engine
-    import viz
     formula = config['kriging']['formula']
     vgm_params = config['sgs_variogram']
     emp_var = r_engine.compute_variogram(sampled_df, formula)
     primary_vgm = get_primary_structure(vgm_params)
     
-    # Hierarchical search seeds
     seeds = get_spatial_heuristics(sampled_df)
-    
     max_dist = emp_var['dist'].max() * 1.1 if len(emp_var) > 0 else primary_vgm['range'] * 2
     
     try:
-        # Use new multi-start fit with spatial heuristics
         fit_params = r_engine.fit_variogram(
             sampled_df, 
             formula, 
@@ -233,9 +209,10 @@ def run_pipeline(config_path):
     true_line = r_engine.get_variogram_line(vgm_params, max_dist)
     
     print(f"[{scenario_name}] Generating variogram visualizations...")
-    viz.plot_variogram_analysis(emp_var, fit_params, true_line, fitted_line, dir_var, out_file=str(out_dir / "variogram_results.png"))
+    time_suffix = f"_t{time_val}" if time_val is not None else ""
+    viz.plot_variogram_analysis(emp_var, fit_params, true_line, fitted_line, dir_var, out_file=str(out_dir / f"variogram_results{time_suffix}.png"))
     if fitted_vgm_params:
-        viz.plot_anisotropy_ellipse(fitted_vgm_params, primary_vgm, scenario_name=scenario_name, out_file=str(out_dir / "anisotropy_ellipse.png"))
+        viz.plot_anisotropy_ellipse(fitted_vgm_params, primary_vgm, scenario_name=scenario_name, out_file=str(out_dir / f"anisotropy_ellipse{time_suffix}.png"))
     
     # 5. Run Kriging
     print(f"[{scenario_name}] Running Kriging...")
@@ -244,13 +221,9 @@ def run_pipeline(config_path):
         pred_domain = run_kriging(sampled_df, grid_df, kriging_cfg['formula'], config['sgs_variogram'])
         
         merged_df = true_domain.copy()
-        
-        # 1. Backtransform NST if applied
         pred_vals = pred_domain['var1.pred'].values
         if nst_processor is not None:
             pred_vals = nst_processor.inverse_transform(pred_vals)
-            
-        # 2. Retrend predictions if detrending was applied
         if processor is not None:
             merged_df['pred'] = processor.retrend(grid_df['x'].values, grid_df['y'].values, pred_vals)
         else:
@@ -259,30 +232,25 @@ def run_pipeline(config_path):
         merged_df['pred_var'] = pred_domain['var1.var']
     except Exception as e:
         print(f"Kriging failed: {e}")
-        return None
+        return None, None
     
     # 6. Run CV
     print(f"[{scenario_name}] Running Cross Validation...")
     try:
         cv_res = run_cv(sampled_df, kriging_cfg['formula'], config['sgs_variogram'], nfold=kriging_cfg.get('cv_nfold', 5))
-        
         obs_cv = cv_res['observed'].values
         pred_cv = cv_res['var1.pred'].values
-        
         if nst_processor is not None:
             obs_cv = nst_processor.inverse_transform(obs_cv)
             pred_cv = nst_processor.inverse_transform(pred_cv)
-            
         if processor is not None:
             obs_cv = processor.retrend(sampled_df['x'].values, sampled_df['y'].values, obs_cv)
             pred_cv = processor.retrend(sampled_df['x'].values, sampled_df['y'].values, pred_cv)
-            
         cv_res_residual = obs_cv - pred_cv
-        
         cv_metrics = {
             'mean_error': float(cv_res_residual.mean()),
             'rmse': float(np.sqrt((cv_res_residual**2).mean())),
-            'msdr': float((cv_res['residual']**2 / cv_res['var1.var']).mean()) # keep msdr in transformed space to test kriging variance validity
+            'msdr': float((cv_res['residual']**2 / cv_res['var1.var']).mean())
         }
     except Exception as e:
         print(f"CV failed: {e}")
@@ -299,7 +267,7 @@ def run_pipeline(config_path):
     }
     
     report = {
-        'config': config,
+        'time_slice': time_val,
         'metrics': metrics,
         'cv_metrics': cv_metrics,
         'summary_stats': {
@@ -310,27 +278,83 @@ def run_pipeline(config_path):
         }
     }
     
-    # 8. Export JSON
-    with open(out_dir / 'evaluation_report.json', 'w') as f:
-        json.dump(report, f, indent=2)
-        
-    with open(out_dir / 'reproduction_config.json', 'w') as f:
-        json.dump({'config': config, 'seed': seed}, f, indent=2)
-        
     # 9. Generate Visualizations
     from viz import plot_2d_results
     print(f"[{scenario_name}] Generating spatial visualizations...")
-    plot_2d_results(merged_df, sampled_df, config['domain'], out_file=str(out_dir / "spatial_results.png"))
+    viz.plot_2d_results(merged_df, sampled_df, config['domain'], out_file=str(out_dir / f"spatial_results{time_suffix}.png"))
         
-    print(f"[{scenario_name}] Done! Reports and visualizations exported successfully.")
+    print(f"[{scenario_name}] Done with slice {time_val}!")
     
-    return {
+    result_metrics = {
         'Scenario': scenario_name,
+        'Time': time_val,
         'RMSE': metrics['overall'].get('RMSE', np.nan),
         'R2': metrics['overall'].get('R2', np.nan)
     }
+    
+    return merged_df, report
+
+def run_pipeline(config_path):
+    with open(config_path, 'r') as f:
+        config = yaml.safe_load(f)
+        
+    scenario_name = Path(config_path).stem
+    out_dir = Path("output") / scenario_name
+    out_dir.mkdir(parents=True, exist_ok=True)
+    
+    seed = config.get('random_seed', 42)
+    grid_df = create_grid(config['domain'])
+    
+    time_slice_cfg = config.get("time_slice", {})
+    is_time_sliced = time_slice_cfg.get("enabled", False)
+    time_col = time_slice_cfg.get("column", "time")
+    
+    if is_time_sliced:
+        # Generate 3 time slices for synthetic testing
+        time_vals = [0, 1, 2]
+    else:
+        time_vals = [None]
+        
+    all_merged = []
+    all_reports = []
+    
+    for t in time_vals:
+        print(f"\n[{scenario_name}] --- Processing Time Slice {t} ---")
+        t_seed = seed + t if t is not None else seed
+        
+        true_domain = generate_sgs(grid_df, config['sgs_variogram'], nsim=1, seed=t_seed)
+        true_domain = apply_trend(true_domain, config.get('trend', {}))
+        true_domain = apply_noise(true_domain, config.get('noise', {}).get('std_dev', 0.0), seed=t_seed)
+        
+        if t is not None:
+            true_domain[time_col] = t
+            
+        sampled_df = sample_domain(true_domain, config.get('sampling', {}), seed=t_seed)
+        
+        # Make copies since run_slice modifies them
+        merged_df, report = run_slice(sampled_df.copy(), true_domain.copy(), grid_df.copy(), config, scenario_name, out_dir, time_val=t)
+        
+        if merged_df is not None:
+            if t is not None:
+                merged_df[time_col] = t
+            all_merged.append(merged_df)
+            all_reports.append(report)
+            
+    # Export combined results
+    if all_merged:
+        final_df = pd.concat(all_merged, ignore_index=True)
+        final_df.to_csv(out_dir / "predicted_grid.csv", index=False)
+        
+    with open(out_dir / 'evaluation_report.json', 'w') as f:
+        json.dump({'config': config, 'reports': all_reports}, f, indent=2)
+        
+    with open(out_dir / 'reproduction_config.json', 'w') as f:
+        json.dump({'config': config, 'seed': seed}, f, indent=2)
+
+    return all_reports
 
 if __name__ == "__main__":
+    import sys
     if len(sys.argv) > 1:
         run_pipeline(sys.argv[1])
     else:

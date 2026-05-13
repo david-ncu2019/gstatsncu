@@ -1,0 +1,37 @@
+domain:
+  nx: 50
+  ny: 50
+  nz: 1
+  cell_size: 1.0
+
+sgs_variogram:
+  model: "Sph"
+  range: 15.0
+  sill: 1.0
+  nugget: 0.1
+  angle: 45.0
+  anisotropy_ratio: 2.0
+
+trend:
+  type: "linear"
+  coefficients:
+    x: 0.05
+    y: 0.02
+    z: 0.0
+
+noise:
+  std_dev: 0.2
+
+sampling:
+  strategy: "random_uniform"
+  fraction: 0.05
+
+time_slice:
+  enabled: true
+  column: "time"
+
+kriging:
+  formula: "value ~ x + y"
+  cv_nfold: 5
+
+random_seed: 42
